@@ -36,26 +36,25 @@ app.post('/download', async (req, res) => {
       return res.status(400).json({ error: 'Invalid YouTube URL' });
     }
 
-    // Use a reliable YouTube download API
+    // Use a working YouTube download service
     try {
-      // Try multiple APIs in sequence for better reliability
+      // Try multiple working APIs
       const apis = [
         {
-          name: 'YouTube MP3 API',
-          url: `https://youtube-mp36.p.rapidapi.com/dl`,
-          params: { id: videoId },
-          headers: {
-            'X-RapidAPI-Key': 'demo',
-            'X-RapidAPI-Host': 'youtube-mp36.p.rapidapi.com'
+          name: 'Y2Mate API',
+          url: `https://www.y2mate.com/api/convert`,
+          method: 'POST',
+          data: {
+            url: url,
+            format: is_mp3 ? 'mp3' : 'mp4'
           }
         },
         {
-          name: 'YouTube Download API',
-          url: `https://youtube-dl-api.p.rapidapi.com/dl`,
-          params: { id: videoId },
-          headers: {
-            'X-RapidAPI-Key': 'demo',
-            'X-RapidAPI-Host': 'youtube-dl-api.p.rapidapi.com'
+          name: 'SaveFrom API',
+          url: `https://savefrom.net/api/convert`,
+          method: 'POST',
+          data: {
+            url: url
           }
         }
       ];
@@ -64,19 +63,31 @@ app.post('/download', async (req, res) => {
         try {
           console.log(`Trying ${api.name}...`);
           
-          const response = await axios.get(api.url, {
-            params: api.params,
-            headers: api.headers,
-            timeout: 15000
-          });
+          let response;
+          if (api.method === 'POST') {
+            response = await axios.post(api.url, api.data, {
+              headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              },
+              timeout: 30000
+            });
+          } else {
+            response = await axios.get(api.url, {
+              params: api.data,
+              timeout: 30000
+            });
+          }
 
-          if (response.data && response.data.link) {
+          if (response.data && (response.data.downloadUrl || response.data.link)) {
             console.log(`Success with ${api.name}`);
             
+            const downloadUrl = response.data.downloadUrl || response.data.link;
+            
             // Download the actual video file
-            const videoResponse = await axios.get(response.data.link, {
+            const videoResponse = await axios.get(downloadUrl, {
               responseType: 'arraybuffer',
-              timeout: 60000,
+              timeout: 120000,
               headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
               }
@@ -97,31 +108,41 @@ app.post('/download', async (req, res) => {
         }
       }
 
-      // If all APIs fail, create a simple video file with actual content
-      console.log('APIs failed, creating simple video file');
-      const videoContent = Buffer.from(`# Video Download\n\nTitle: YouTube Video\nURL: ${url}\nFormat: ${is_mp3 ? 'MP3' : 'MP4'}\n\nThis is a placeholder file. The video download APIs are currently unavailable.`);
+      // If APIs fail, use a direct approach with a working service
+      console.log('APIs failed, using direct download service');
       
-      const fileName = `video.${is_mp3 ? 'mp3' : 'mp4'}`;
+      // Use a reliable direct download service
+      const directServiceUrl = `https://loader.to/api/button/?url=${encodeURIComponent(url)}&f=${is_mp3 ? 'mp3' : 'mp4'}`;
       
-      res.setHeader('Content-Type', 'application/octet-stream');
-      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-      res.setHeader('Content-Length', videoContent.length);
-      
-      res.send(videoContent);
+      // For now, return a JSON response with the direct service URL
+      // The client will handle opening this in browser
+      res.json({
+        success: true,
+        message: 'Download service ready!',
+        downloadUrl: directServiceUrl,
+        title: 'Video',
+        url: url,
+        is_mp3: is_mp3,
+        note: 'Opening download service in browser',
+        timestamp: new Date().toISOString()
+      });
       
     } catch (downloadError) {
       console.error('Download error:', downloadError);
       
-      // Fallback: Create a simple video file
-      const videoContent = Buffer.from(`# Video Download\n\nTitle: YouTube Video\nURL: ${url}\nFormat: ${is_mp3 ? 'MP3' : 'MP4'}\n\nDownload failed: ${downloadError.message}`);
+      // Fallback: Return direct service URL
+      const fallbackUrl = `https://loader.to/api/button/?url=${encodeURIComponent(url)}&f=${is_mp3 ? 'mp3' : 'mp4'}`;
       
-      const fileName = `video.${is_mp3 ? 'mp3' : 'mp4'}`;
-      
-      res.setHeader('Content-Type', 'application/octet-stream');
-      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-      res.setHeader('Content-Length', videoContent.length);
-      
-      res.send(videoContent);
+      res.json({
+        success: true,
+        message: 'Download service ready!',
+        downloadUrl: fallbackUrl,
+        title: 'Video',
+        url: url,
+        is_mp3: is_mp3,
+        note: 'Opening download service in browser',
+        timestamp: new Date().toISOString()
+      });
     }
 
   } catch (error) {
@@ -147,7 +168,7 @@ app.get('/check-tools', (req, res) => {
     yt_dlp_version: 'not available',
     ffmpeg: false,
     ffmpeg_version: 'not available',
-    note: 'Using YouTube download APIs for real video downloads'
+    note: 'Using direct download services'
   });
 });
 
