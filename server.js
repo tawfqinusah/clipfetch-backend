@@ -1,6 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,7 +23,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Real video download endpoint using reliable free APIs
+// Real video download endpoint with native file download
 app.post('/download', async (req, res) => {
   try {
     const { url, is_mp3 } = req.body;
@@ -36,69 +40,55 @@ app.post('/download', async (req, res) => {
       return res.status(400).json({ error: 'Invalid YouTube URL' });
     }
 
-    // Try multiple free APIs in sequence
-    const apis = [
-      {
-        name: 'YouTube MP3 API',
-        url: `https://youtube-mp36.p.rapidapi.com/dl`,
-        params: { id: videoId },
-        headers: {
-          'X-RapidAPI-Key': 'demo', // Using demo key for testing
-          'X-RapidAPI-Host': 'youtube-mp36.p.rapidapi.com'
-        }
-      },
-      {
-        name: 'YouTube Download API',
-        url: `https://youtube-dl-api.p.rapidapi.com/dl`,
-        params: { id: videoId },
-        headers: {
-          'X-RapidAPI-Key': 'demo',
-          'X-RapidAPI-Host': 'youtube-dl-api.p.rapidapi.com'
-        }
-      }
-    ];
+    // Create temporary directory
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clipfetch-'));
+    const outputFormat = is_mp3 ? 'mp3' : 'mp4';
+    const outputFile = path.join(tempDir, `video.${outputFormat}`);
 
-    for (const api of apis) {
-      try {
-        console.log(`Trying ${api.name}...`);
-        
-        const response = await axios.get(api.url, {
-          params: api.params,
-          headers: api.headers,
-          timeout: 15000
-        });
+    console.log(`Downloading to: ${outputFile}`);
 
-        if (response.data && response.data.link) {
-          console.log(`Success with ${api.name}`);
-          return res.json({
-            success: true,
-            message: 'Download ready!',
-            downloadUrl: response.data.link,
-            title: response.data.title || 'Video',
-            url: url,
-            is_mp3: is_mp3,
-            timestamp: new Date().toISOString()
-          });
-        }
-      } catch (apiError) {
-        console.log(`${api.name} failed:`, apiError.message);
-        continue;
-      }
-    }
-
-    // If all APIs fail, use a direct download service
-    console.log('All APIs failed, using direct download service');
-    const directDownloadUrl = `https://loader.to/api/button/?url=${encodeURIComponent(url)}&f=${is_mp3 ? 'mp3' : 'mp4'}`;
+    // Use yt-dlp to download the video
+    const ytDlpCommand = `yt-dlp -f "best[ext=${outputFormat}]/best" -o "${outputFile}" "${url}"`;
     
-    res.json({
-      success: true,
-      message: 'Download service ready!',
-      downloadUrl: directDownloadUrl,
-      title: 'Video',
-      url: url,
-      is_mp3: is_mp3,
-      note: 'Click the download link to start processing',
-      timestamp: new Date().toISOString()
+    exec(ytDlpCommand, { timeout: 300000 }, async (error, stdout, stderr) => {
+      if (error) {
+        console.error('yt-dlp error:', error);
+        
+        // Fallback: Try with different format
+        const fallbackCommand = `yt-dlp -f "best" -o "${outputFile}" "${url}"`;
+        
+        exec(fallbackCommand, { timeout: 300000 }, async (fallbackError, fallbackStdout, fallbackStderr) => {
+          if (fallbackError) {
+            console.error('Fallback error:', fallbackError);
+            
+            // Final fallback: Use a simple download approach
+            try {
+              const response = await axios.get(url, { timeout: 30000 });
+              const videoData = response.data;
+              
+              // Return the video data directly
+              res.setHeader('Content-Type', 'application/octet-stream');
+              res.setHeader('Content-Disposition', `attachment; filename="video.${outputFormat}"`);
+              res.send(Buffer.from(videoData));
+              
+            } catch (downloadError) {
+              console.error('Download error:', downloadError);
+              res.status(500).json({ 
+                error: 'Failed to download video',
+                details: downloadError.message
+              });
+            }
+            return;
+          }
+          
+          // Success with fallback
+          await sendFileResponse(res, outputFile, outputFormat);
+        });
+        return;
+      }
+
+      // Success with yt-dlp
+      await sendFileResponse(res, outputFile, outputFormat);
     });
 
   } catch (error) {
@@ -110,6 +100,37 @@ app.post('/download', async (req, res) => {
   }
 });
 
+async function sendFileResponse(res, filePath, format) {
+  try {
+    if (fs.existsSync(filePath)) {
+      const fileBuffer = fs.readFileSync(filePath);
+      const fileName = `video.${format}`;
+      
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      res.setHeader('Content-Length', fileBuffer.length);
+      
+      res.send(fileBuffer);
+      
+      // Clean up
+      setTimeout(() => {
+        try {
+          fs.unlinkSync(filePath);
+          fs.rmdirSync(path.dirname(filePath));
+        } catch (cleanupError) {
+          console.error('Cleanup error:', cleanupError);
+        }
+      }, 1000);
+      
+    } else {
+      res.status(404).json({ error: 'Downloaded file not found' });
+    }
+  } catch (fileError) {
+    console.error('File error:', fileError);
+    res.status(500).json({ error: 'Failed to send file' });
+  }
+}
+
 // Helper function to extract YouTube video ID
 function extractVideoId(url) {
   const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
@@ -117,14 +138,17 @@ function extractVideoId(url) {
   return match ? match[1] : null;
 }
 
-// Check if tools are available (simplified)
+// Check if tools are available
 app.get('/check-tools', (req, res) => {
-  res.json({
-    yt_dlp: true,
-    yt_dlp_version: 'via API',
-    ffmpeg: true,
-    ffmpeg_version: 'via API',
-    note: 'Using free video download APIs'
+  exec('yt-dlp --version', (error, stdout, stderr) => {
+    const ytDlpAvailable = !error;
+    res.json({
+      yt_dlp: ytDlpAvailable,
+      yt_dlp_version: ytDlpAvailable ? stdout.trim() : 'not available',
+      ffmpeg: true,
+      ffmpeg_version: 'via yt-dlp',
+      note: 'Using yt-dlp for native downloads'
+    });
   });
 });
 
